@@ -2,33 +2,22 @@
 """
 Cockpit Overlay
 ---------------
-画面下部に透過表示されるコックピット風オーバーレイ。
-  左パネル : キー入力（Q/W/E/R, A/S/D/F, Z/X/C/V, Space）に反応するボタン群
-  右パネル : マウス移動に連動する操縦レバー（ジョイスティック表示）
-
-OBS のウィンドウキャプチャで配信オーバーレイとして使用可能。
+猫の手がコックピット操作パネル（左）と操縦桿（右）を握る透過オーバーレイ。
+OBS ウィンドウキャプチャ対応。ドラッグバーはギャップを挟んで上部に分離。
 """
 
 import sys
-from PyQt6.QtWidgets import QApplication, QWidget, QHBoxLayout, QVBoxLayout
+from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QRectF, QPointF, QPoint
 from PyQt6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QFont,
-    QPainterPath, QRadialGradient,
+    QPainter, QColor, QPen, QBrush,
+    QPainterPath, QRadialGradient, QLinearGradient,
 )
 from pynput import keyboard as kb, mouse as ms
 
 
-# ── キーレイアウト ────────────────────────────────────────────────────────────
+# ── 入力ブリッジ ──────────────────────────────────────────────────────────────
 
-KEY_ROWS = [
-    ["Q", "W", "E", "R"],
-    ["A", "S", "D", "F"],
-    ["Z", "X", "C", "V"],
-    ["", "SPACE", "", ""],
-]
-
-# pynput の特殊キー → 表示名
 SPECIAL_KEYS: dict = {
     kb.Key.space:   "SPACE",
     kb.Key.shift:   "SHIFT",
@@ -39,12 +28,10 @@ SPECIAL_KEYS: dict = {
 }
 
 
-# ── pynput → Qt シグナルブリッジ ──────────────────────────────────────────────
-
 class InputBridge(QObject):
     key_pressed  = pyqtSignal(str)
     key_released = pyqtSignal(str)
-    mouse_moved  = pyqtSignal(float, float)   # 正規化済み –1.0 … +1.0
+    mouse_moved  = pyqtSignal(float, float)
 
     def __init__(self, screen_w: int, screen_h: int) -> None:
         super().__init__()
@@ -90,29 +77,46 @@ class InputBridge(QObject):
         self._ms.stop()
 
 
-# ── 左パネル：キーボード ──────────────────────────────────────────────────────
+# ── カラーパレット ────────────────────────────────────────────────────────────
 
-class KeyPanel(QWidget):
-    KEY_W = 52
-    KEY_H = 44
-    GAP   = 6
-    PAD   = 14
+CAT_BASE  = QColor(0xD8, 0xC8, 0xB8)
+CAT_DARK  = QColor(0xB8, 0xA0, 0x7A)
+CAT_PAD   = QColor(0xE8, 0xB0, 0xA8)
 
-    C_BG      = QColor(18, 20, 30, 210)
-    C_KEY_OFF = QColor(42, 48, 64, 230)
-    C_KEY_ON  = QColor(70, 190, 255, 245)
-    C_BORDER  = QColor(90, 110, 150, 180)
-    C_TEXT    = QColor(200, 220, 255, 255)
-    C_TEXT_ON = QColor(10,  20,  40, 255)
+PANEL_TOP  = QColor(0x2A, 0x30, 0x50)
+PANEL_BOT  = QColor(0x12, 0x18, 0x2A)
+PANEL_EDGE = QColor(0x45, 0x5A, 0x85)
+
+STICK_BODY   = QColor(0x30, 0x30, 0x40)
+STICK_HLIGHT = QColor(0x58, 0x5A, 0x6C)
+STICK_BASE_C = QColor(0x1A, 0x1A, 0x28)
+STICK_CAP    = QColor(0x50, 0x52, 0x62)
+
+BTN_RED     = QColor(0xCC, 0x22, 0x22)
+BTN_RED_G   = QColor(0xFF, 0x55, 0x55)
+BTN_GREEN   = QColor(0x00, 0xCC, 0xAA)
+BTN_GREEN_G = QColor(0x00, 0xFF, 0xCC)
+BTN_BLUE    = QColor(0x22, 0x44, 0xCC)
+BTN_BLUE_G  = QColor(0x55, 0x88, 0xFF)
+
+RED_KEYS   = {"SPACE"}
+GREEN_KEYS = {"E", "R", "F", "SHIFT"}
+BLUE_KEYS  = {"Q", "W", "A", "S", "D", "Z", "X", "C", "V"}
+
+
+# ── コックピットキャンバス ────────────────────────────────────────────────────
+
+class CockpitCanvas(QWidget):
+    W = 760
+    H = 300
 
     def __init__(self) -> None:
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(self.W, self.H)
         self._active: set[str] = set()
-        cols = max(len(r) for r in KEY_ROWS)
-        w = self.PAD * 2 + cols * (self.KEY_W + self.GAP) - self.GAP
-        h = self.PAD * 2 + len(KEY_ROWS) * (self.KEY_H + self.GAP) - self.GAP
-        self.setFixedSize(w, h)
+        self._mx = 0.0
+        self._my = 0.0
 
     def press(self, name: str) -> None:
         self._active.add(name)
@@ -122,139 +126,251 @@ class KeyPanel(QWidget):
         self._active.discard(name)
         self.update()
 
-    def paintEvent(self, _) -> None:
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # パネル背景
-        bg_path = QPainterPath()
-        bg_path.addRoundedRect(QRectF(self.rect()), 12, 12)
-        p.fillPath(bg_path, self.C_BG)
-        p.setPen(QPen(self.C_BORDER, 1.5))
-        p.drawPath(bg_path)
-
-        p.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
-
-        for row_i, row in enumerate(KEY_ROWS):
-            for col_i, key in enumerate(row):
-                if not key:
-                    continue
-                is_space = key == "SPACE"
-                kw = self.KEY_W * 2 + self.GAP if is_space else self.KEY_W
-                x  = self.PAD + col_i * (self.KEY_W + self.GAP)
-                y  = self.PAD + row_i * (self.KEY_H + self.GAP)
-                on = key in self._active
-
-                kpath = QPainterPath()
-                kpath.addRoundedRect(QRectF(x, y, kw, self.KEY_H), 6, 6)
-
-                if on:
-                    grad = QRadialGradient(x + kw / 2, y + self.KEY_H / 2, kw * 0.7)
-                    grad.setColorAt(0, QColor(130, 225, 255, 255))
-                    grad.setColorAt(1, QColor(60,  180, 255, 200))
-                    p.fillPath(kpath, QBrush(grad))
-                    p.setPen(QPen(QColor(180, 240, 255), 1.5))
-                else:
-                    p.fillPath(kpath, self.C_KEY_OFF)
-                    p.setPen(QPen(self.C_BORDER, 1))
-
-                p.drawPath(kpath)
-                p.setPen(self.C_TEXT_ON if on else self.C_TEXT)
-                p.drawText(QRectF(x, y, kw, self.KEY_H),
-                           Qt.AlignmentFlag.AlignCenter, key)
-
-
-# ── 右パネル：マウスジョイスティック ─────────────────────────────────────────
-
-class JoystickPanel(QWidget):
-    SIZE = 190
-
-    C_BG     = QColor(18, 20, 30, 210)
-    C_BORDER = QColor(90, 110, 150, 180)
-    C_RING   = QColor(55, 65, 85, 220)
-    C_AXIS   = QColor(55, 75,  95, 150)
-    C_STICK  = QColor(70, 190, 255, 200)
-    C_BASE   = QColor(50, 65,  90, 210)
-    C_DOT    = QColor(255, 255, 255, 250)
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._nx = 0.0
-        self._ny = 0.0
-        self.setFixedSize(self.SIZE, self.SIZE)
-
-    def update_pos(self, nx: float, ny: float) -> None:
-        self._nx = nx
-        self._ny = ny
+    def update_mouse(self, nx: float, ny: float) -> None:
+        self._mx = nx
+        self._my = ny
         self.update()
 
+    # ── paintEvent ───────────────────────────────────────────────────────────
+
     def paintEvent(self, _) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._draw_left(p)
+        self._draw_right(p)
 
-        cx, cy   = self.SIZE / 2, self.SIZE / 2
-        r_outer  = (self.SIZE - 24) / 2
-        r_base   = r_outer * 0.28
+    # ── 左側: コントロールパネル ──────────────────────────────────────────────
 
-        # パネル背景
-        bg_path = QPainterPath()
-        bg_path.addRoundedRect(QRectF(self.rect()), 12, 12)
-        p.fillPath(bg_path, self.C_BG)
-        p.setPen(QPen(self.C_BORDER, 1.5))
-        p.drawPath(bg_path)
+    def _draw_left(self, p: QPainter) -> None:
+        pcx = self.W * 0.235   # ≈ 179
+        pcy = self.H * 0.40    # ≈ 120
 
-        # 外枠リング
-        p.setPen(QPen(self.C_RING, 2))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawEllipse(QPointF(cx, cy), r_outer, r_outer)
+        # 指（パネルの後ろに描く）
+        self._draw_cat_fingers_left(p, pcx, pcy)
 
-        # 軸線
-        p.setPen(QPen(self.C_AXIS, 1))
-        p.drawLine(int(cx - r_outer), int(cy), int(cx + r_outer), int(cy))
-        p.drawLine(int(cx), int(cy - r_outer), int(cx), int(cy + r_outer))
+        # パネル本体
+        pw, ph = 225, 132
+        p.save()
+        p.translate(pcx, pcy)
+        p.rotate(-17)
 
-        # スティック先端位置（円内にクランプ）
-        dx = self._nx * r_outer
-        dy = self._ny * r_outer
-        dist = (dx ** 2 + dy ** 2) ** 0.5
-        if dist > r_outer:
-            dx = dx / dist * r_outer
-            dy = dy / dist * r_outer
+        panel = QPainterPath()
+        panel.addRoundedRect(QRectF(-pw/2, -ph/2, pw, ph), 14, 14)
 
-        # スティック棒
-        p.setPen(QPen(self.C_STICK, 3))
-        p.drawLine(int(cx), int(cy), int(cx + dx), int(cy + dy))
+        grad = QLinearGradient(0, -ph/2, 0, ph/2)
+        grad.setColorAt(0, PANEL_TOP)
+        grad.setColorAt(1, PANEL_BOT)
+        p.fillPath(panel, QBrush(grad))
+        p.setPen(QPen(PANEL_EDGE, 2))
+        p.drawPath(panel)
 
-        # 中心ベース
+        # 上端ハイライト
+        p.setPen(QPen(QColor(0x65, 0x85, 0xB8, 110), 1))
+        p.drawLine(int(-pw/2 + 14), int(-ph/2 + 2), int(pw/2 - 14), int(-ph/2 + 2))
+
+        # ボタン配置
+        red_on   = bool(self._active & RED_KEYS)
+        green_on = bool(self._active & GREEN_KEYS)
+        blue_on  = bool(self._active & BLUE_KEYS)
+
+        self._draw_dome_button(p,  55,  12, 20, BTN_RED,   BTN_RED_G,   red_on)
+        self._draw_dome_button(p, -15,  12, 20, BTN_GREEN, BTN_GREEN_G, green_on)
+
+        for i, (bx, by) in enumerate([(-80, -22), (-80, 4), (-80, 30), (-80, 56)]):
+            self._draw_small_button(p, bx, by, 8,
+                                    BTN_BLUE, BTN_BLUE_G, blue_on and i < 2)
+
+        p.restore()
+
+    def _draw_cat_fingers_left(self, p: QPainter, pcx: float, pcy: float) -> None:
+        # 人差し指〜薬指（パネル手前を包む）
+        for fx, fy, fw, fh, fa in [
+            (pcx - 80, pcy + 108, 31, 90, -14),
+            (pcx - 38, pcy + 116, 33, 96,  -5),
+            (pcx +  8, pcy + 116, 33, 94,   3),
+            (pcx + 52, pcy + 108, 30, 86,  12),
+        ]:
+            self._draw_finger(p, fx, fy, fw, fh, fa)
+
+        # 親指（左下から見える）
+        self._draw_finger(p, pcx - 112, pcy + 38, 28, 62, -52)
+
+    # ── 右側: 操縦桿 ─────────────────────────────────────────────────────────
+
+    def _draw_right(self, p: QPainter) -> None:
+        scx = self.W * 0.795   # ≈ 605
+        scy = self.H * 0.38    # ≈ 114
+
+        # 指（桿の後ろに描く）
+        self._draw_cat_fingers_right(p, scx, scy)
+
+        # 操縦桿（マウスX軸で傾く）
+        tilt = self._mx * 12
+        p.save()
+        p.translate(scx, scy)
+        p.rotate(tilt + 6)
+        self._draw_joystick(p)
+        p.restore()
+
+    def _draw_joystick(self, p: QPainter) -> None:
+        # ── ベース台形 ───────────────────────────────────────────────────────
+        bw_top, bw_bot, bh = 65, 88, 32
+        base = QPainterPath()
+        base.moveTo(-bw_bot / 2, bh)
+        base.lineTo( bw_bot / 2, bh)
+        base.lineTo( bw_top / 2, 0)
+        base.lineTo(-bw_top / 2, 0)
+        base.closeSubpath()
+        bg = QLinearGradient(-bw_bot/2, 0, bw_bot/2, 0)
+        bg.setColorAt(0,   STICK_BASE_C.darker(130))
+        bg.setColorAt(0.5, STICK_BASE_C.lighter(115))
+        bg.setColorAt(1,   STICK_BASE_C.darker(130))
+        p.setPen(QPen(QColor(0x0E, 0x0E, 0x1A), 1.5))
+        p.setBrush(QBrush(bg))
+        p.drawPath(base)
+
+        # ── グリップ ─────────────────────────────────────────────────────────
+        gw, gh = 58, 112
+        grip = QPainterPath()
+        grip.addRoundedRect(QRectF(-gw/2, -gh, gw, gh), 17, 17)
+        gg = QLinearGradient(-gw/2, 0, gw/2, 0)
+        gg.setColorAt(0,   STICK_BODY.darker(135))
+        gg.setColorAt(0.3, STICK_HLIGHT)
+        gg.setColorAt(0.7, STICK_BODY)
+        gg.setColorAt(1,   STICK_BODY.darker(140))
+        p.setPen(QPen(QColor(0x16, 0x16, 0x22), 1.5))
+        p.setBrush(QBrush(gg))
+        p.drawPath(grip)
+
+        # グリップのリブ線
+        p.setPen(QPen(QColor(0x1A, 0x1A, 0x2C, 120), 1))
+        for y in range(int(-gh * 0.88), -8, 14):
+            p.drawLine(int(-gw/2 + 10), y, int(gw/2 - 10), y)
+
+        # トリガーボタン（側面）
+        trig_on = bool(self._active & RED_KEYS)
+        self._draw_small_button(p, int(gw/2) + 1, int(-gh * 0.58), 9,
+                                BTN_RED, BTN_RED_G, trig_on)
+
+        # ── トップキャップ ───────────────────────────────────────────────────
+        cap_w, cap_h = 52, 22
+        cap = QPainterPath()
+        cap.addEllipse(QRectF(-cap_w/2, -gh - cap_h/2, cap_w, cap_h))
+        cg = QLinearGradient(0, -gh - cap_h, 0, -gh)
+        cg.setColorAt(0, STICK_CAP.lighter(135))
+        cg.setColorAt(1, STICK_CAP.darker(110))
+        p.setPen(QPen(QColor(0x28, 0x28, 0x38), 1.5))
+        p.setBrush(QBrush(cg))
+        p.drawPath(cap)
+
+        # キャップハイライト
+        hl = QRadialGradient(0, -gh - cap_h * 0.3, cap_w * 0.36)
+        hl.setColorAt(0, QColor(255, 255, 255, 105))
+        hl.setColorAt(1, QColor(255, 255, 255, 0))
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(self.C_BASE)
-        p.drawEllipse(QPointF(cx, cy), r_base, r_base)
+        p.setBrush(QBrush(hl))
+        p.drawEllipse(QPointF(0, -gh - cap_h * 0.3), cap_w * 0.36, cap_h * 0.32)
 
-        # 先端グロー
-        glow = QRadialGradient(cx + dx, cy + dy, 18)
-        glow.setColorAt(0, QColor(150, 225, 255, 230))
-        glow.setColorAt(1, QColor(70, 190, 255, 0))
-        p.setBrush(QBrush(glow))
-        p.drawEllipse(QPointF(cx + dx, cy + dy), 16, 16)
+    def _draw_cat_fingers_right(self, p: QPainter, scx: float, scy: float) -> None:
+        # 人差し指〜薬指（グリップを包む）
+        for fx, fy, fw, fh, fa in [
+            (scx - 45, scy + 104, 30, 88,  -9),
+            (scx - 14, scy + 112, 32, 94,  -2),
+            (scx + 18, scy + 110, 32, 92,   5),
+            (scx + 48, scy + 102, 29, 82,  13),
+        ]:
+            self._draw_finger(p, fx, fy, fw, fh, fa)
 
-        # 先端ドット
-        p.setBrush(self.C_DOT)
-        p.drawEllipse(QPointF(cx + dx, cy + dy), 6, 6)
+        # 人差し指（トリガー方向に伸びる）
+        self._draw_finger(p, scx + 62, scy + 14, 25, 68, 62)
 
-        # 座標テキスト
-        p.setFont(QFont("Consolas", 8))
-        p.setPen(QColor(110, 150, 195, 200))
-        p.drawText(QRectF(0, self.SIZE - 22, self.SIZE, 18),
-                   Qt.AlignmentFlag.AlignCenter,
-                   f"X:{self._nx:+.2f}  Y:{self._ny:+.2f}")
+        # 親指（キャップ付近）
+        self._draw_finger(p, scx - 22, scy - 76, 26, 54, -22)
+
+    # ── 指プリミティブ ────────────────────────────────────────────────────────
+
+    def _draw_finger(self, p: QPainter, cx: float, cy: float,
+                     fw: float, fh: float, angle: float) -> None:
+        p.save()
+        p.translate(cx, cy)
+        p.rotate(angle)
+
+        # 影
+        shadow = QPainterPath()
+        shadow.addRoundedRect(QRectF(-fw/2 + 3, -fh/2 + 5, fw, fh), fw*0.42, fw*0.42)
+        p.fillPath(shadow, QColor(0, 0, 0, 48))
+
+        # 指本体
+        body = QPainterPath()
+        body.addRoundedRect(QRectF(-fw/2, -fh/2, fw, fh), fw*0.43, fw*0.43)
+
+        bg = QLinearGradient(-fw/2, 0, fw/2, 0)
+        bg.setColorAt(0,    CAT_DARK)
+        bg.setColorAt(0.32, CAT_BASE)
+        bg.setColorAt(0.65, CAT_BASE.lighter(108))
+        bg.setColorAt(1,    CAT_DARK)
+        p.setPen(QPen(CAT_DARK.darker(118), 1))
+        p.setBrush(QBrush(bg))
+        p.drawPath(body)
+
+        # 関節ライン
+        p.setPen(QPen(CAT_DARK.darker(110), 0.8))
+        for yo in (-fh * 0.10, fh * 0.13):
+            p.drawLine(int(-fw * 0.30), int(yo), int(fw * 0.30), int(yo))
+
+        # 肉球パッド
+        pr = fw * 0.37
+        pad = QPainterPath()
+        pad.addEllipse(QPointF(0, fh * 0.33), pr, pr * 0.84)
+        p.fillPath(pad, QColor(CAT_PAD.red(), CAT_PAD.green(), CAT_PAD.blue(), 185))
+        p.setPen(QPen(CAT_DARK, 0.5))
+        p.drawPath(pad)
+
+        p.restore()
+
+    # ── ボタン描画 ────────────────────────────────────────────────────────────
+
+    def _draw_dome_button(self, p: QPainter, x: float, y: float, r: float,
+                          color: QColor, glow: QColor, active: bool) -> None:
+        if active:
+            halo = QRadialGradient(x, y, r * 3.0)
+            halo.setColorAt(0, QColor(glow.red(), glow.green(), glow.blue(), 155))
+            halo.setColorAt(1, QColor(glow.red(), glow.green(), glow.blue(), 0))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(halo))
+            p.drawEllipse(QPointF(x, y), r * 3.0, r * 3.0)
+
+        c = glow if active else color
+        body = QRadialGradient(x - r*0.22, y - r*0.22, r * 1.35)
+        body.setColorAt(0,   c.lighter(140))
+        body.setColorAt(0.5, c)
+        body.setColorAt(1,   c.darker(155))
+        p.setPen(QPen(c.darker(185), 1.5))
+        p.setBrush(QBrush(body))
+        p.drawEllipse(QPointF(x, y), r, r)
+
+        # ドームハイライト
+        hl = QRadialGradient(x - r*0.28, y - r*0.38, r * 0.52)
+        hl.setColorAt(0, QColor(255, 255, 255, 115))
+        hl.setColorAt(1, QColor(255, 255, 255, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(hl))
+        p.drawEllipse(QPointF(x - r*0.10, y - r*0.18), r*0.54, r*0.44)
+
+    def _draw_small_button(self, p: QPainter, x: float, y: float, r: float,
+                           color: QColor, glow: QColor, active: bool) -> None:
+        c = glow if active else color
+        body = QRadialGradient(x - r*0.3, y - r*0.3, r * 1.2)
+        body.setColorAt(0, c.lighter(130))
+        body.setColorAt(1, c.darker(145))
+        p.setPen(QPen(c.darker(165), 1))
+        p.setBrush(QBrush(body))
+        p.drawEllipse(QPointF(x, y), r, r)
 
 
 # ── ドラッグハンドル ──────────────────────────────────────────────────────────
 
 class CloseButton(QWidget):
-    """×ボタン。クリックでアプリを終了する。"""
-
     SIZE = 18
     C_NORMAL = QColor(180, 60, 60, 200)
     C_HOVER  = QColor(230, 80, 80, 240)
@@ -282,20 +398,17 @@ class CloseButton(QWidget):
     def paintEvent(self, _) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        color = self.C_HOVER if self._hovered else self.C_NORMAL
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(color)
+        p.setBrush(self.C_HOVER if self._hovered else self.C_NORMAL)
         p.drawEllipse(self.rect())
-        p.setPen(QPen(QColor(255, 255, 255, 220), 1.8))
         m = 5
         s = self.SIZE
+        p.setPen(QPen(QColor(255, 255, 255, 220), 1.8))
         p.drawLine(m, m, s - m, s - m)
         p.drawLine(s - m, m, m, s - m)
 
 
 class DragHandle(QWidget):
-    """ウィンドウ上部のドラッグ可能なバー。つかんで移動、×で終了。"""
-
     HEIGHT = 22
     C_BG     = QColor(28, 32, 45, 200)
     C_BORDER = QColor(90, 110, 150, 160)
@@ -308,7 +421,6 @@ class DragHandle(QWidget):
         self._drag_pos: QPoint | None = None
         self.setFixedHeight(self.HEIGHT)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
-
         self._close_btn = CloseButton(on_close)
         self._close_btn.setParent(self)
 
@@ -330,8 +442,6 @@ class DragHandle(QWidget):
     def paintEvent(self, _) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # 背景バー（上角だけ丸める）
         path = QPainterPath()
         r = QRectF(self.rect())
         path.moveTo(r.left() + 8, r.top())
@@ -343,19 +453,30 @@ class DragHandle(QWidget):
         p.fillPath(path, self.C_BG)
         p.setPen(QPen(self.C_BORDER, 1))
         p.drawPath(path)
-
-        # グリップドット（中央に3つ）
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(self.C_GRIP)
         cy = self.HEIGHT // 2
         for dx in (-8, 0, 8):
-            cx = self.width() // 2 + dx
-            p.drawEllipse(QPointF(cx, cy), 2.5, 2.5)
+            p.drawEllipse(QPointF(self.width() // 2 + dx, cy), 2.5, 2.5)
+
+
+# ── 透明ギャップ ──────────────────────────────────────────────────────────────
+
+class TransparentGap(QWidget):
+    def __init__(self, height: int) -> None:
+        super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedHeight(height)
+
+    def paintEvent(self, _) -> None:
+        pass
 
 
 # ── メインウィンドウ ──────────────────────────────────────────────────────────
 
 class CockpitOverlay(QWidget):
+    GAP_H = 28   # ドラッグバーとキャンバスの間隔 (OBSクロップ用)
+
     def __init__(self, bridge: InputBridge) -> None:
         super().__init__()
         self.setWindowFlags(
@@ -365,42 +486,36 @@ class CockpitOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle("CockpitOverlay")
 
-        self._bridge = bridge
-        self._key_panel = KeyPanel()
-        self._joy_panel = JoystickPanel()
-        self._drag_handle = DragHandle(self, on_close=self._quit)
-
-        panels = QHBoxLayout()
-        panels.setContentsMargins(24, 0, 24, 12)
-        panels.setSpacing(36)
-        panels.addWidget(self._key_panel)
-        panels.addWidget(self._joy_panel)
+        self._bridge  = bridge
+        self._canvas  = CockpitCanvas()
+        self._handle  = DragHandle(self, on_close=self._quit)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(self._drag_handle)
-        root.addLayout(panels)
+        root.addWidget(self._handle)
+        root.addWidget(TransparentGap(self.GAP_H))
+        root.addWidget(self._canvas)
 
-        bridge.key_pressed.connect(self._key_panel.press)
-        bridge.key_released.connect(self._key_panel.release)
-        bridge.mouse_moved.connect(self._joy_panel.update_pos)
+        bridge.key_pressed.connect(self._canvas.press)
+        bridge.key_released.connect(self._canvas.release)
+        bridge.mouse_moved.connect(self._canvas.update_mouse)
 
         self._snap_to_bottom()
-
-    def _quit(self) -> None:
-        self._bridge.stop()
-        QApplication.quit()
 
     def _snap_to_bottom(self) -> None:
         screen = QApplication.primaryScreen().geometry()
         self.adjustSize()
         x = (screen.width() - self.width()) // 2
-        y = screen.height() - self.height() - 48
+        y = screen.height() - self.height() - 40
         self.move(x, y)
 
+    def _quit(self) -> None:
+        self._bridge.stop()
+        QApplication.quit()
+
     def paintEvent(self, _) -> None:
-        pass   # 子ウィジェットが個別に描画するため何もしない
+        pass
 
 
 # ── エントリポイント ──────────────────────────────────────────────────────────
