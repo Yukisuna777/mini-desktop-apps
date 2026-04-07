@@ -360,10 +360,10 @@ class CockpitOverlay(QWidget):
         super().__init__()
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool,
+            Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowTitle("CockpitOverlay")
 
         self._bridge = bridge
         self._key_panel = KeyPanel()
