@@ -85,6 +85,10 @@ class InputBridge(QObject):
         self._kb.start()
         self._ms.start()
 
+    def stop(self) -> None:
+        self._kb.stop()
+        self._ms.stop()
+
 
 # ── 左パネル：キーボード ──────────────────────────────────────────────────────
 
@@ -248,21 +252,69 @@ class JoystickPanel(QWidget):
 
 # ── ドラッグハンドル ──────────────────────────────────────────────────────────
 
-class DragHandle(QWidget):
-    """ウィンドウ上部のドラッグ可能なバー。つかんで移動できる。"""
+class CloseButton(QWidget):
+    """×ボタン。クリックでアプリを終了する。"""
 
-    HEIGHT = 18
+    SIZE = 18
+    C_NORMAL = QColor(180, 60, 60, 200)
+    C_HOVER  = QColor(230, 80, 80, 240)
+
+    def __init__(self, on_click) -> None:
+        super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._on_click = on_click
+        self._hovered = False
+
+    def enterEvent(self, _) -> None:
+        self._hovered = True
+        self.update()
+
+    def leaveEvent(self, _) -> None:
+        self._hovered = False
+        self.update()
+
+    def mousePressEvent(self, e) -> None:
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._on_click()
+
+    def paintEvent(self, _) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = self.C_HOVER if self._hovered else self.C_NORMAL
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(color)
+        p.drawEllipse(self.rect())
+        p.setPen(QPen(QColor(255, 255, 255, 220), 1.8))
+        m = 5
+        s = self.SIZE
+        p.drawLine(m, m, s - m, s - m)
+        p.drawLine(s - m, m, m, s - m)
+
+
+class DragHandle(QWidget):
+    """ウィンドウ上部のドラッグ可能なバー。つかんで移動、×で終了。"""
+
+    HEIGHT = 22
     C_BG     = QColor(28, 32, 45, 200)
     C_BORDER = QColor(90, 110, 150, 160)
     C_GRIP   = QColor(100, 130, 170, 180)
 
-    def __init__(self, target: QWidget) -> None:
+    def __init__(self, target: QWidget, on_close) -> None:
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._target = target
         self._drag_pos: QPoint | None = None
         self.setFixedHeight(self.HEIGHT)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+        self._close_btn = CloseButton(on_close)
+        self._close_btn.setParent(self)
+
+    def resizeEvent(self, _) -> None:
+        m = (self.HEIGHT - CloseButton.SIZE) // 2
+        self._close_btn.move(self.width() - CloseButton.SIZE - m, m)
 
     def mousePressEvent(self, e) -> None:
         if e.button() == Qt.MouseButton.LeftButton:
@@ -313,9 +365,10 @@ class CockpitOverlay(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
+        self._bridge = bridge
         self._key_panel = KeyPanel()
         self._joy_panel = JoystickPanel()
-        self._drag_handle = DragHandle(self)
+        self._drag_handle = DragHandle(self, on_close=self._quit)
 
         panels = QHBoxLayout()
         panels.setContentsMargins(24, 0, 24, 12)
@@ -334,6 +387,10 @@ class CockpitOverlay(QWidget):
         bridge.mouse_moved.connect(self._joy_panel.update_pos)
 
         self._snap_to_bottom()
+
+    def _quit(self) -> None:
+        self._bridge.stop()
+        QApplication.quit()
 
     def _snap_to_bottom(self) -> None:
         screen = QApplication.primaryScreen().geometry()
